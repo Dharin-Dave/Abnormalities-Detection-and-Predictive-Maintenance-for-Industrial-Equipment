@@ -7,9 +7,13 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
+from scipy import stats
+from sklearn.ensemble import IsolationForest
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Set page configuration
 st.set_page_config(
@@ -69,7 +73,11 @@ def train_models(X_train, y_train):
     lr_model = LogisticRegression(C=29.763514416313132, solver='liblinear', random_state=42)
     lr_model.fit(X_train, y_train)
     
-    return rf_model, lr_model
+    # XGBoost model
+    xgb_model = XGBClassifier(objective="binary:logistic", random_state=42)
+    xgb_model.fit(X_train, y_train)
+    
+    return rf_model, lr_model, xgb_model
 
 def evaluate_model(model, X_test, y_test, model_name):
     # Make predictions
@@ -90,7 +98,7 @@ def evaluate_model(model, X_test, y_test, model_name):
 
 def plot_feature_importance(model, feature_names, model_name):
     if hasattr(model, 'feature_importances_'):
-        # For Random Forest
+        # For Random Forest and XGBoost
         importances = model.feature_importances_
         indices = np.argsort(importances)[::-1]
         
@@ -117,20 +125,30 @@ def plot_feature_importance(model, feature_names, model_name):
         return fig
     return None
 
+def detect_outliers(df, threshold=3):
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+    z_scores = stats.zscore(df[numeric_columns])
+    outliers = (abs(z_scores) > threshold).any(axis=1)
+    return df[outliers], z_scores
+
+def detect_anomalies_isolation_forest(df, contamination=0.1):
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+    clf = IsolationForest(contamination=contamination, random_state=42)
+    anomalies = clf.fit_predict(df[numeric_columns])
+    return df[anomalies == -1], clf.decision_function(df[numeric_columns])
+
 # Load data using the uploaded file
 df = load_data(uploaded_file)
 
 if df is not None:
-    # Sidebar for navigation
-    st.sidebar.title("Navigation")
     # Replace radio buttons with tabs
-    tabs = st.tabs(["Data Overview", "Exploratory Analysis", "Model Performance", "Prediction"])
+    tabs = st.tabs(["Data Overview", "Exploratory Analysis", "Model Performance", "Anomaly Detection"])
     
     # Process data
     X_train, X_test, y_train, y_test, scaler, num_cols, feature_names = process_data(df)
     
     # Train models
-    rf_model, lr_model = train_models(X_train, y_train)
+    rf_model, lr_model, xgb_model = train_models(X_train, y_train)
     
     # Data overview
     with tabs[0]:
@@ -160,9 +178,11 @@ if df is not None:
         
         # Location distribution
         st.subheader("Location Distribution")
-        fig = px.bar(df['location'].value_counts().reset_index(), 
-                    x='index', y='location', 
-                    labels={'index': 'Location', 'location': 'Count'},
+        location_counts = df['location'].value_counts().reset_index()
+        location_counts.columns = ['location', 'count']  # Explicitly name the columns
+        fig = px.bar(location_counts, 
+                    x='location', y='count', 
+                    labels={'location': 'Location', 'count': 'Count'},
                     title='Count by Location')
         st.plotly_chart(fig)
         
@@ -175,83 +195,129 @@ if df is not None:
     # Exploratory analysis
     with tabs[1]:
         st.header("Exploratory Data Analysis")
+
+        # Equipment Distribution
+        st.subheader("Equipment Distribution")
+        df_equip_counts = df['equipment'].value_counts()
         
-        # Distribution of numerical features
-        st.subheader("Distribution of Numerical Features")
-        
-        feature = st.selectbox("Select Feature", 
-                               ["temperature", "pressure", "vibration", "humidity"])
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Histogram
-            fig = px.histogram(df, x=feature, color="faulty", 
-                               marginal="box", 
-                               title=f"Distribution of {feature}",
-                               color_discrete_sequence=["blue", "red"])
-            st.plotly_chart(fig)
-        
-        with col2:
-            # Boxplot by equipment
-            fig = px.box(df, x="equipment", y=feature, color="faulty",
-                         title=f"{feature} by Equipment Type",
-                         color_discrete_sequence=["blue", "red"])
-            st.plotly_chart(fig)
-        
-        # Correlation matrix
-        st.subheader("Correlation Matrix")
-        corr = df[["temperature", "pressure", "vibration", "humidity", "faulty"]].corr()
-        fig = px.imshow(corr, text_auto=True, aspect="auto", color_continuous_scale="RdBu_r")
+        fig = make_subplots(rows=1, cols=2, specs=[[{'type':'bar'}, {'type':'pie'}]])
+        fig.add_trace(go.Bar(x=df_equip_counts.index, y=df_equip_counts.values, name='Equipment Count'), row=1, col=1)
+        fig.add_trace(go.Pie(labels=df_equip_counts.index, values=df_equip_counts.values, name='Equipment Percentage'), row=1, col=2)
+        fig.update_layout(height=500, width=800, title_text="Equipment Distribution")
         st.plotly_chart(fig)
+
+        # Location Distribution
+        st.subheader("Location Distribution")
+        df_location_counts = df['location'].value_counts()
         
-        # Scatter plots
-        st.subheader("Feature Relationships")
-        x_axis = st.selectbox("X-axis", ["temperature", "pressure", "vibration", "humidity"], key="x_axis")
-        y_axis = st.selectbox("Y-axis", ["pressure", "temperature", "vibration", "humidity"], key="y_axis")
-        
-        fig = px.scatter(df, x=x_axis, y=y_axis, color="faulty", 
-                         facet_col="equipment", 
-                         title=f"{y_axis} vs {x_axis} by Equipment Type",
-                         color_discrete_sequence=["blue", "red"])
+        fig = make_subplots(rows=1, cols=2, specs=[[{'type':'bar'}, {'type':'pie'}]])
+        fig.add_trace(go.Bar(x=df_location_counts.index, y=df_location_counts.values, name='Location Count'), row=1, col=1)
+        fig.add_trace(go.Pie(labels=df_location_counts.index, values=df_location_counts.values, name='Location Percentage'), row=1, col=2)
+        fig.update_layout(height=500, width=800, title_text="Location Distribution")
         st.plotly_chart(fig)
+
+        # Equipment per Location
+        st.subheader("Equipment per Location")
+        df_location_equip_counts = df.pivot_table(index=['location'], columns='equipment', aggfunc='size', fill_value=0)
+        fig = px.bar(df_location_equip_counts, barmode='group')
+        fig.update_layout(height=500, width=800, title_text="Equipment per Location")
+        st.plotly_chart(fig)
+
+        # Temperature Distribution
+        st.subheader("Temperature Distribution")
+        fig = make_subplots(rows=1, cols=3)
+        fig.add_trace(go.Histogram(x=df['temperature'], name='Overall', histnorm='percent'), row=1, col=1)
+        for equipment in df['equipment'].unique():
+            fig.add_trace(go.Histogram(x=df[df['equipment'] == equipment]['temperature'], name=equipment, histnorm='percent'), row=1, col=2)
+        for location in df['location'].unique():
+            fig.add_trace(go.Histogram(x=df[df['location'] == location]['temperature'], name=location, histnorm='percent'), row=1, col=3)
+        fig.update_layout(height=500, width=1000, title_text="Temperature Distribution")
+        st.plotly_chart(fig)
+
+        # Pressure Distribution
+        st.subheader("Pressure Distribution")
+        fig = make_subplots(rows=1, cols=3)
+        fig.add_trace(go.Histogram(x=df['pressure'], name='Overall', histnorm='percent'), row=1, col=1)
+        for equipment in df['equipment'].unique():
+            fig.add_trace(go.Histogram(x=df[df['equipment'] == equipment]['pressure'], name=equipment, histnorm='percent'), row=1, col=2)
+        for location in df['location'].unique():
+            fig.add_trace(go.Histogram(x=df[df['location'] == location]['pressure'], name=location, histnorm='percent'), row=1, col=3)
+        fig.update_layout(height=500, width=1000, title_text="Pressure Distribution")
+        st.plotly_chart(fig)
+
+        # Vibration Distribution
+        st.subheader("Vibration Distribution")
+        fig = make_subplots(rows=1, cols=3)
+        fig.add_trace(go.Histogram(x=df['vibration'], name='Overall', histnorm='percent'), row=1, col=1)
+        for equipment in df['equipment'].unique():
+            fig.add_trace(go.Histogram(x=df[df['equipment'] == equipment]['vibration'], name=equipment, histnorm='percent'), row=1, col=2)
+        for location in df['location'].unique():
+            fig.add_trace(go.Histogram(x=df[df['location'] == location]['vibration'], name=location, histnorm='percent'), row=1, col=3)
+        fig.update_layout(height=500, width=1000, title_text="Vibration Distribution")
+        st.plotly_chart(fig)
+
+        # Humidity Distribution
+        st.subheader("Humidity Distribution")
+        fig = make_subplots(rows=1, cols=3)
+        fig.add_trace(go.Histogram(x=df['humidity'], name='Overall', histnorm='percent'), row=1, col=1)
+        for equipment in df['equipment'].unique():
+            fig.add_trace(go.Histogram(x=df[df['equipment'] == equipment]['humidity'], name=equipment, histnorm='percent'), row=1, col=2)
+        for location in df['location'].unique():
+            fig.add_trace(go.Histogram(x=df[df['location'] == location]['humidity'], name=location, histnorm='percent'), row=1, col=3)
+        fig.update_layout(height=500, width=1000, title_text="Humidity Distribution")
+        st.plotly_chart(fig)
+
+        # Fault Distribution by Location and Equipment
+        st.subheader("Fault Distribution")
+        df_location_faulty_counts = df.pivot_table(index=['location'], columns='faulty', aggfunc='size', fill_value=0)
+        df_equip_faulty_counts = df.pivot_table(index=['equipment'], columns='faulty', aggfunc='size', fill_value=0)
         
-        # Feature distribution by faulty status
-        st.subheader("Feature Distribution by Faulty Status")
+        fig = make_subplots(rows=1, cols=2)
+        fig.add_trace(go.Bar(x=df_location_faulty_counts.index, y=df_location_faulty_counts[False], name='Not Faulty', offsetgroup=0), row=1, col=1)
+        fig.add_trace(go.Bar(x=df_location_faulty_counts.index, y=df_location_faulty_counts[True], name='Faulty', offsetgroup=1), row=1, col=1)
+        fig.add_trace(go.Bar(x=df_equip_faulty_counts.index, y=df_equip_faulty_counts[False], name='Not Faulty', offsetgroup=0), row=1, col=2)
+        fig.add_trace(go.Bar(x=df_equip_faulty_counts.index, y=df_equip_faulty_counts[True], name='Faulty', offsetgroup=1), row=1, col=2)
+        fig.update_layout(height=500, width=1000, title_text="Fault Distribution by Location and Equipment", barmode='group')
+        st.plotly_chart(fig)
+
+        # Correlation Heatmap
+        st.subheader("Correlation Heatmap")
+        df_corr = df.drop(['equipment', 'location'], axis=1)
+        correlation = df_corr.corr()
+        fig = px.imshow(correlation, text_auto=True, aspect="auto")
+        fig.update_layout(height=600, width=800, title_text="Correlation Heatmap")
+        st.plotly_chart(fig)
+
+        # Distribution of Measurements by Fault Status
+        st.subheader("Distribution of Measurements by Fault Status")
+        measurements = ['vibration', 'temperature', 'humidity', 'pressure']
+        fig = make_subplots(rows=2, cols=2, subplot_titles=measurements)
         
-        col1, col2 = st.columns(2)
+        for i, measurement in enumerate(measurements):
+            row = i // 2 + 1
+            col = i % 2 + 1
+            fig.add_trace(go.Histogram(x=df[df['faulty'] == False][measurement], name='Not Faulty', histnorm='percent'), row=row, col=col)
+            fig.add_trace(go.Histogram(x=df[df['faulty'] == True][measurement], name='Faulty', histnorm='percent'), row=row, col=col)
         
-        with col1:
-            fig = px.histogram(df, x="temperature", color="faulty", barmode="group",
-                              title="Temperature Distribution by Faulty Status")
-            st.plotly_chart(fig)
-            
-            fig = px.histogram(df, x="vibration", color="faulty", barmode="group",
-                              title="Vibration Distribution by Faulty Status")
-            st.plotly_chart(fig)
-        
-        with col2:
-            fig = px.histogram(df, x="pressure", color="faulty", barmode="group",
-                              title="Pressure Distribution by Faulty Status")
-            st.plotly_chart(fig)
-            
-            fig = px.histogram(df, x="humidity", color="faulty", barmode="group",
-                              title="Humidity Distribution by Faulty Status")
-            st.plotly_chart(fig)
+        fig.update_layout(height=800, width=1000, title_text="Distribution of Measurements by Fault Status")
+        st.plotly_chart(fig)
     
     # Model performance
     with tabs[2]:
         st.header("Model Performance")
         
         # Select model
-        model_option = st.selectbox("Select Model", ["Random Forest", "Logistic Regression"])
-        
+        model_option = st.selectbox("Select Model", ["Random Forest", "Logistic Regression", "XGBoost"])
+
         if model_option == "Random Forest":
             model = rf_model
             model_name = "Random Forest"
-        else:
+        elif model_option == "Logistic Regression":
             model = lr_model
             model_name = "Logistic Regression"
+        else:
+            model = xgb_model
+            model_name = "XGBoost"
         
         # Evaluate model
         report, fpr, tpr, roc_auc, cm, y_pred = evaluate_model(model, X_test, y_test, model_name)
@@ -296,110 +362,40 @@ if df is not None:
     
     # Prediction
     with tabs[3]:
-        st.header("Predict Equipment Failure")
-        st.write("Enter equipment parameters to predict if it's likely to fail.")
+        st.header("Anomaly Detection")
+        method = st.radio("Select Anomaly Detection Method", ["Outliers", "Isolation Forest"])
         
-        col1, col2 = st.columns(2)
+        if method == "Outliers":
+            threshold = st.slider("Z-score Threshold", 2.0, 5.0, 3.0, 0.1)
+            anomalies, scores = detect_outliers(df, threshold)
+        else:
+            contamination = st.slider("Contamination Factor", 0.01, 0.5, 0.1, 0.01)
+            anomalies, scores = detect_anomalies_isolation_forest(df, contamination)
         
-        with col1:
-            temperature = st.slider("Temperature", float(df['temperature'].min()), float(df['temperature'].max()), float(df['temperature'].mean()))
-            pressure = st.slider("Pressure", float(df['pressure'].min()), float(df['pressure'].max()), float(df['pressure'].mean()))
+        st.subheader(f"Detected Anomalies ({len(anomalies)} rows)")
         
-        with col2:
-            vibration = st.slider("Vibration", float(df['vibration'].min()), float(df['vibration'].max()), float(df['vibration'].mean()))
-            humidity = st.slider("Humidity", float(df['humidity'].min()), float(df['humidity'].max()), float(df['humidity'].mean()))
+        if not anomalies.empty:
+            # Create a styled dataframe
+            def highlight_anomalies(row):
+                numeric_columns = df.select_dtypes(include=[np.number]).columns
+                if method == "Outliers":
+                    return ['background-color: red' if col in numeric_columns and abs(scores.loc[row.name, col]) > threshold else '' for col in row.index]
+                else:
+                    return ['background-color: red' if col in numeric_columns and scores[row.name] < np.percentile(scores, 10) else '' for col in row.index]
+            styled_anomalies = anomalies.style.apply(highlight_anomalies, axis=1)
+            st.dataframe(styled_anomalies)
+        else:
+            st.write("No anomalies detected.")
         
-        equipment = st.selectbox("Equipment Type", df['equipment'].unique())
-        location = st.selectbox("Location", df['location'].unique())
-        
-        # Create a dataframe for the input
-        input_data = pd.DataFrame({
-            'temperature': [temperature],
-            'pressure': [pressure],
-            'vibration': [vibration],
-            'humidity': [humidity],
-            'equipment': [equipment],
-            'location': [location]
-        })
-        
-        # One-hot encode the input
-        input_encoded = pd.get_dummies(input_data, drop_first=True)
-        
-        # Ensure all columns from training are present
-        for col in X_train.columns:
-            if col not in input_encoded.columns:
-                input_encoded[col] = 0
-        
-        # Reorder columns to match training data
-        input_encoded = input_encoded[X_train.columns]
-        
-        # Select model BEFORE the predict button
-        model_option = st.radio("Select Model for Prediction", 
-                               ["Random Forest", "Logistic Regression"], 
-                               key="prediction_model_selector")
-        
-        # Make prediction
-        if st.button("Predict"):
-            if model_option == "Random Forest":
-                model = rf_model
-                model_name = "Random Forest"
-            else:  # Fix for Logistic Regression
-                model = lr_model
-                model_name = "Logistic Regression"
+        # Visualize anomalies
+        if not anomalies.empty:
+            st.subheader("Anomaly Visualization")
+            feature_x = st.selectbox("Select X-axis feature", df.select_dtypes(include=[np.number]).columns)
+            feature_y = st.selectbox("Select Y-axis feature", df.select_dtypes(include=[np.number]).columns)
             
-            # Predict
-            prediction = model.predict(input_encoded)[0]
-            probability = model.predict_proba(input_encoded)[0][1]
-            
-            # Display result
-            st.subheader("Prediction Result")
-            if prediction:
-                st.error(f"⚠️ Equipment is predicted to be FAULTY with {probability:.2%} probability")
-            else:
-                st.success(f"✅ Equipment is predicted to be NORMAL with {(1-probability):.2%} probability")
-            
-            # Gauge chart for failure probability
-            fig = go.Figure(go.Indicator(
-                mode = "gauge+number",
-                value = probability * 100,
-                domain = {'x': [0, 1], 'y': [0, 1]},
-                title = {'text': "Failure Probability (%)"},
-                gauge = {
-                    'axis': {'range': [0, 100]},
-                    'bar': {'color': "darkred"},
-                    'steps': [
-                        {'range': [0, 30], 'color': "green"},
-                        {'range': [30, 70], 'color': "yellow"},
-                        {'range': [70, 100], 'color': "red"}
-                    ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': probability * 100
-                    }
-                }
-            ))
+            fig = px.scatter(df, x=feature_x, y=feature_y, color=df.index.isin(anomalies.index),
+                            color_discrete_map={True: 'red', False: 'blue'},
+                            labels={'color': 'Is Anomaly'})
             st.plotly_chart(fig)
-            
-            # Explanation based on feature importance
-            if hasattr(model, 'feature_importances_') or hasattr(model, 'coef_'):
-                st.subheader("Prediction Explanation")
-                
-                if hasattr(model, 'feature_importances_'):
-                    # For Random Forest
-                    importances = model.feature_importances_
-                    feature_importance = dict(zip(X_train.columns, importances))
-                elif hasattr(model, 'coef_'):
-                    # For Logistic Regression
-                    coefficients = model.coef_[0]
-                    feature_importance = dict(zip(X_train.columns, coefficients))
-                
-                # Sort by absolute importance/coefficient
-                sorted_importance = sorted(feature_importance.items(), key=lambda x: abs(x[1]), reverse=True)
-                
-                # Display top 5 features
-                st.write("Top 5 influential features for this prediction:")
-                for feature, importance in sorted_importance[:5]:
-                    st.write(f"- {feature}: {importance:.4f}")
 else:
     st.info("Please upload the equipment_anomaly_data.csv file to start the analysis.")
